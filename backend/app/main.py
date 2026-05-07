@@ -8,9 +8,13 @@ from typing import Annotated
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.schemas import MeasureResponse, ProjectCreateRequest, ProjectRecord
-from app.services.measurement import analyze_measurement
-from app.services.storage import get_project, load_projects, save_project
+from .schemas import MeasureResponse, ProjectCreateRequest, ProjectRecord
+from .services.measurement_room import analyze_room_measurement
+from .services.storage import get_project, load_projects, save_project
+from .services.room_3d import generate_room_box_zip
+from pydantic import BaseModel
+import io
+from fastapi.responses import StreamingResponse
 
 app = FastAPI(title="Length Lab API", version="1.0.0")
 
@@ -38,20 +42,15 @@ def health() -> dict[str, str]:
 async def measure_images(
     project_name: Annotated[str, Form(...)],
     files: Annotated[list[UploadFile], File(...)],
-    reference_width_cm: Annotated[float | None, Form()] = None,
     user_id: Annotated[str | None, Form()] = None,
 ) -> MeasureResponse:
-    if not files:
-        raise HTTPException(status_code=400, detail="Upload at least one image.")
-
-    if len(files) > 3:
-        raise HTTPException(status_code=400, detail="You can upload up to 3 images.")
+    if len(files) != 3:
+        raise HTTPException(status_code=400, detail="Upload exactly 3 images to generate a single fused 3D room view.")
 
     try:
-        measurement = await analyze_measurement(
+        measurement = await analyze_room_measurement(
             files,
             project_name,
-            reference_width_cm=reference_width_cm,
         )
         return measurement
     except ValueError as exc:
@@ -83,3 +82,20 @@ def create_project(payload: ProjectCreateRequest) -> ProjectRecord:
         userId=payload.userId,
     )
     return save_project(record)
+
+
+class Room3DRequest(BaseModel):
+    length_m: float
+    width_m: float
+    height_m: float
+    backgroundDataUrl: str | None = None
+
+
+@app.post("/measure/3d")
+def measure_3d(payload: Room3DRequest):
+    """Return a ZIP file containing a simple OBJ/MTL room mesh generated from dimensions.
+
+    Accepts JSON with `length_m`, `width_m`, `height_m` and optional `backgroundDataUrl` (data URL).
+    """
+    zip_bytes = generate_room_box_zip(payload.length_m, payload.width_m, payload.height_m, payload.backgroundDataUrl)
+    return StreamingResponse(io.BytesIO(zip_bytes), media_type="application/zip", headers={"Content-Disposition": "attachment; filename=room3d.zip"})

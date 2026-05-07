@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from fastapi import UploadFile
 
-from app.schemas import ImageMeasurement, MeasureResponse, MeasurementObject
+from ..schemas import ImageMeasurement, MeasureResponse, MeasurementObject
 
 
 def _encode_png_data_url(image: np.ndarray) -> str:
@@ -42,7 +42,15 @@ def _extract_object_contours(image: np.ndarray) -> list[np.ndarray]:
     return filtered[:8]
 
 
-def _resolve_scale(contours: list[np.ndarray], reference_width_cm: float | None) -> tuple[float, str]:
+def _resolve_scale(
+    contours: list[np.ndarray], reference_width_cm: float | None = None, smallest_object_cm: float | None = None
+) -> tuple[float, str]:
+    """
+    Resolve the scale (pixels per cm) using either:
+    1. Manual reference width provided by user
+    2. Estimated from smallest detected object (assuming it's 1-3cm)
+    3. Fall back to error if nothing works
+    """
     if reference_width_cm and reference_width_cm > 0 and contours:
         reference_contour = max(contours, key=cv2.contourArea)
         (_, _), (rect_w, rect_h), _ = cv2.minAreaRect(reference_contour)
@@ -50,9 +58,18 @@ def _resolve_scale(contours: list[np.ndarray], reference_width_cm: float | None)
         if reference_pixels > 0:
             return reference_pixels / reference_width_cm, "reference-width"
 
+    # If we have info about a small object (coin/card), use it
+    if smallest_object_cm and smallest_object_cm > 0 and contours:
+        smallest_contour = min(contours, key=cv2.contourArea)
+        (_, _), (rect_w, rect_h), _ = cv2.minAreaRect(smallest_contour)
+        smallest_pixels = max(rect_w, rect_h)
+        if smallest_pixels > 0 and 5 < smallest_pixels / smallest_object_cm < 2000:
+            return smallest_pixels / smallest_object_cm, "auto-detected-reference"
+
     raise ValueError(
-        "Real-world measurements require a known scale length from the image, drawing, or plan. "
-        "Please enter one real dimension in mm, cm, or m before measuring."
+        "Real-world measurements require a known scale. "
+        "Either: (1) include a reference object like a coin or credit card, "
+        "(2) enter one known real dimension from the image, or (3) upload a measurement from a ruler/scale."
     )
 
 
@@ -80,16 +97,72 @@ def _build_background_preview(image: np.ndarray, object_mask: np.ndarray) -> np.
     return cv2.inpaint(image, object_mask, 7, cv2.INPAINT_TELEA)
 
 
+def _is_circular(contour: np.ndarray) -> bool:
+    """Check if a contour is approximately circular."""
+    area = cv2.contourArea(contour)
+    if area < 50:
+        return False
+    perimeter = cv2.arcLength(contour, True)
+    if perimeter == 0:
+        return False
+    circularity = 4 * np.pi * area / (perimeter * perimeter)
+    return circularity > 0.6
+
+
 def _detect_reference_objects(
     contours: list[np.ndarray], pixels_per_cm: float, image_shape: tuple
 ) -> tuple[list[dict], dict | None]:
     """
-    Detect if any contours match standard reference objects (door, sofa, TV, etc).
+    Detect if any contours match standard reference objects (coins, cards, door, sofa, TV, etc).
     Returns list of detected reference objects and best suggestion.
     """
-    from app.schemas import DetectedObjectType
+    from ..schemas import DetectedObjectType
 
     REFERENCE_DATABASE = {
+        "penny": {
+            "diameter_cm": 1.905,
+            "type": "coin",
+            "tolerance": 0.25,
+            "description": "US Penny (smallest, 1¢)",
+            "emoji": "🪙",
+        },
+        "dime": {
+            "diameter_cm": 1.791,
+            "type": "coin",
+            "tolerance": 0.25,
+            "description": "US Dime",
+            "emoji": "🪙",
+        },
+        "nickel": {
+            "diameter_cm": 2.108,
+            "type": "coin",
+            "tolerance": 0.25,
+            "description": "US Nickel",
+            "emoji": "🪙",
+        },
+        "quarter": {
+            "diameter_cm": 2.413,
+            "type": "coin",
+            "tolerance": 0.25,
+            "description": "US Quarter",
+            "emoji": "🪙",
+        },
+        "credit_card": {
+            "width_cm": 8.56,
+            "height_cm": 5.398,
+            "type": "card",
+            "tolerance": 0.15,
+            "description": "Standard credit card",
+            "emoji": "💳",
+        },
+        "passport": {
+            "width_cm": 12.4,
+            "height_cm": 8.8,
+            "type": "card",
+            "tolerance": 0.2,
+            "description": "Passport size",
+            "emoji": "🛂",
+        },
         "door": {
             "height_cm": 210,
             "width_cm": 90,
@@ -122,18 +195,52 @@ def _detect_reference_objects(
 
     detected = []
 
-    for contour in contours[:3]:  # Check top 3 largest contours
+    for contour in contours:
         area = cv2.contourArea(contour)
-        if area < 1000:  # Skip very small contours
+        if area < 50:  # Skip very small contours
             continue
 
         (_, _), (rect_w, rect_h), _ = cv2.minAreaRect(contour)
         obj_length_cm = max(rect_w, rect_h) / pixels_per_cm
         obj_width_cm = min(rect_w, rect_h) / pixels_per_cm
+        is_circle = _is_circular(contour)
 
         # Try to match against standard objects
         for ref_type, ref_specs in REFERENCE_DATABASE.items():
-            if ref_type == "door":
+            if ref_specs.get("type") == "coin" and is_circle:
+                # Detect coins by diameter
+                avg_diameter_cm = (obj_length_cm + obj_width_cm) / 2
+                expected_diameter = ref_specs["diameter_cm"]
+                diameter_match = abs(avg_diameter_cm - expected_diameter) / expected_diameter
+
+                if diameter_match < ref_specs["tolerance"]:
+                    detected.append(
+                        {
+                            "objectType": ref_type,
+                            "confidence": max(0.7, 1.0 - diameter_match),
+                            "standardDimension": expected_diameter,
+                            "dimension": f"{expected_diameter} cm",
+                            "reason": ref_specs["description"],
+                        }
+                    )
+
+            elif ref_specs.get("type") == "card" and not is_circle:
+                # Detect cards by aspect ratio
+                width_match = abs(obj_length_cm - ref_specs["width_cm"]) / ref_specs["width_cm"]
+                height_match = abs(obj_width_cm - ref_specs["height_cm"]) / ref_specs["height_cm"]
+
+                if width_match < ref_specs["tolerance"] and height_match < ref_specs["tolerance"]:
+                    detected.append(
+                        {
+                            "objectType": ref_type,
+                            "confidence": max(0.7, 1.0 - (width_match + height_match) / 2),
+                            "standardDimension": ref_specs["width_cm"],
+                            "dimension": f"{ref_specs['width_cm']} cm × {ref_specs['height_cm']} cm",
+                            "reason": ref_specs["description"],
+                        }
+                    )
+
+            elif ref_type == "door":
                 height_match = abs(obj_length_cm - ref_specs["height_cm"]) / ref_specs["height_cm"]
                 width_match = abs(obj_width_cm - ref_specs["width_cm"]) / ref_specs["width_cm"]
 
@@ -148,7 +255,6 @@ def _detect_reference_objects(
                             "reason": ref_specs["description"],
                         }
                     )
-                    break
 
             elif ref_type == "sofa":
                 width_match = abs(obj_length_cm - ref_specs["width_cm"]) / ref_specs["width_cm"]
@@ -164,7 +270,6 @@ def _detect_reference_objects(
                             "reason": ref_specs["description"],
                         }
                     )
-                    break
 
             elif ref_type == "tv_55":
                 width_match = abs(obj_length_cm - ref_specs["width_cm"]) / ref_specs["width_cm"]
@@ -180,7 +285,6 @@ def _detect_reference_objects(
                             "reason": ref_specs["description"],
                         }
                     )
-                    break
 
     # Pick best match (highest confidence)
     best_match = max(detected, key=lambda x: x["confidence"]) if detected else None
@@ -193,7 +297,7 @@ async def analyze_measurement(
     project_name: str,
     reference_width_cm: float | None = None,
 ) -> MeasureResponse:
-    from app.schemas import DetectedObjectType
+    from ..schemas import DetectedObjectType
 
     images: list[ImageMeasurement] = []
 
@@ -206,9 +310,36 @@ async def analyze_measurement(
             raise ValueError(f"Could not decode uploaded image: {file.filename}")
 
         contours = _extract_object_contours(decoded)
-        pixels_per_cm, calibration_source = _resolve_scale(contours, reference_width_cm)
+        
+        # Estimate scale using a heuristic: assume smallest detected object might be ~2cm (e.g., coin)
+        # This gives us a reasonable first guess
+        pixels_per_cm = 1.0
+        calibration_source = "unknown"
+        
+        if reference_width_cm and reference_width_cm > 0:
+            # User provided manual scale
+            if contours:
+                reference_contour = max(contours, key=cv2.contourArea)
+                (_, _), (rect_w, rect_h), _ = cv2.minAreaRect(reference_contour)
+                reference_pixels = max(rect_w, rect_h)
+                if reference_pixels > 0:
+                    pixels_per_cm = reference_pixels / reference_width_cm
+                    calibration_source = "reference-width"
+        else:
+            # Try to auto-detect reference by finding small objects that match known sizes
+            if contours:
+                smallest_contour = min(contours, key=cv2.contourArea)
+                (_, _), (rect_w, rect_h), _ = cv2.minAreaRect(smallest_contour)
+                smallest_pixels = max(rect_w, rect_h)
+                
+                # Assume smallest object is 1.5-2.5 cm (reasonable guess for coin/small card)
+                if smallest_pixels > 0:
+                    estimated_scale = smallest_pixels / 2.0  # Assume ~2cm
+                    if 5 < estimated_scale < 2000:  # Sanity check
+                        pixels_per_cm = estimated_scale
+                        calibration_source = "auto-estimated"
 
-        # Detect standard reference objects
+        # Detect reference objects using calculated scale
         detected_refs, best_ref = _detect_reference_objects(contours, pixels_per_cm, decoded.shape)
 
         object_mask = np.zeros(decoded.shape[:2], dtype=np.uint8)

@@ -23,6 +23,8 @@ export function BlueprintView({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
+  const displayMeasurements = measurements.slice(0, 5);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -45,7 +47,7 @@ export function BlueprintView({
       ctx.globalAlpha = 1;
 
       // Draw dimension annotations for each measurement
-      measurements.forEach((measurement, index) => {
+      displayMeasurements.forEach((measurement, index) => {
         drawMeasurementAnnotations(ctx, measurement, pixelsPerCm, index);
       });
 
@@ -55,7 +57,7 @@ export function BlueprintView({
 
     img.crossOrigin = 'anonymous';
     img.src = imageSrc;
-  }, [imageSrc, measurements, pixelsPerCm]);
+  }, [imageSrc, displayMeasurements, pixelsPerCm]);
 
   return (
     <div ref={containerRef} className="relative w-full overflow-auto rounded-2xl border-2 border-slate-300 bg-slate-50">
@@ -68,7 +70,7 @@ export function BlueprintView({
         style={{ maxHeight: '600px', objectFit: 'contain' }}
       />
       <div className="space-y-2 border-t border-slate-300 bg-slate-100 p-4 text-xs font-mono">
-        {measurements.map((measurement, idx) => (
+        {displayMeasurements.map((measurement, idx) => (
           <div key={idx} className="flex items-center justify-between gap-4 text-slate-700">
             <span className="text-slate-600">
               {measurement.name}:

@@ -8,7 +8,6 @@ import { Check, ImagePlus, Loader2, Save, Shield } from 'lucide-react';
 
 import { AppShell } from '@/components/AppShell';
 import { BlueprintView } from '@/components/BlueprintView';
-import { ReferenceObjectGuide, EstimationHelper } from '@/components/ReferenceObjectGuide';
 import { AutoCalibrationSuggestion } from '@/components/AutoCalibrationSuggestion';
 import type { ImageMeasurement, MeasureResponse, MeasurementObject } from '@/lib/api';
 import { measureImages, saveProject } from '@/lib/api';
@@ -18,14 +17,6 @@ type PreviewFile = {
   previewUrl: string;
 };
 
-type ScaleUnit = 'mm' | 'cm' | 'm';
-
-function toCentimeters(value: number, unit: ScaleUnit): number {
-  if (unit === 'mm') return value / 10;
-  if (unit === 'm') return value * 100;
-  return value;
-}
-
 function formatMetricTriplet(valueCm: number) {
   return {
     mm: `${(valueCm * 10).toFixed(1)} mm`,
@@ -34,11 +25,18 @@ function formatMetricTriplet(valueCm: number) {
   };
 }
 
+function compactObjects(objects: MeasurementObject[]): MeasurementObject[] {
+  // Keep only core wall entries in case backend returns noisy detections.
+  const preferred = objects.filter((obj) => /^Wall [A-D]$/i.test(obj.name));
+  if (preferred.length > 0) {
+    return preferred.slice(0, 4);
+  }
+  return objects.slice(0, 4);
+}
+
 export default function MeasurePage() {
   const { data: session, status } = useSession();
   const [projectName, setProjectName] = useState('');
-  const [referenceScaleValue, setReferenceScaleValue] = useState<string>('');
-  const [referenceScaleUnit, setReferenceScaleUnit] = useState<ScaleUnit>('cm');
   const [files, setFiles] = useState<File[]>([]);
   const [measurement, setMeasurement] = useState<MeasureResponse | null>(null);
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([]);
@@ -48,8 +46,6 @@ export default function MeasurePage() {
   const [savedProjectId, setSavedProjectId] = useState('');
   const [previewFiles, setPreviewFiles] = useState<PreviewFile[]>([]);
   const [showBlueprintView, setShowBlueprintView] = useState(true);
-  const [selectedReferenceObject, setSelectedReferenceObject] = useState<{ name: string; value: number } | null>(null);
-  const [showReferenceGuide, setShowReferenceGuide] = useState(true);
 
   useEffect(() => {
     const nextPreviewFiles = files.map((file) => ({ file, previewUrl: URL.createObjectURL(file) }));
@@ -87,9 +83,8 @@ export default function MeasurePage() {
       return;
     }
 
-    const numericScaleValue = Number(referenceScaleValue);
-    if (!referenceScaleValue || !Number.isFinite(numericScaleValue) || numericScaleValue <= 0) {
-      setError('Enter one known real-world length from the image, drawing, or plan before measuring.');
+    if (files.length < 3) {
+      setError('Please upload exactly 3 images covering the entire room with a 1-meter ruler in each.');
       return;
     }
 
@@ -103,11 +98,10 @@ export default function MeasurePage() {
         projectName: projectName || 'Untitled project',
         files,
         userId,
-        referenceWidthCm: toCentimeters(numericScaleValue, referenceScaleUnit)
       });
 
       setMeasurement(result);
-      setSelectedObjectIds(result.images.flatMap((image) => image.objects.map((object) => object.id)));
+      setSelectedObjectIds(result.images.flatMap((image) => compactObjects(image.objects).map((object) => object.id)));
       setSavedProjectId('');
     } catch (measureError) {
       setError(measureError instanceof Error ? measureError.message : 'Measurement failed.');
@@ -150,15 +144,15 @@ export default function MeasurePage() {
       <section className="rounded-[2rem] border border-line bg-white p-6 shadow-sm sm:p-8">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.3em] text-moss">Measurement studio</p>
-            <h1 className="mt-2 font-[family-name:var(--font-space-grotesk)] text-4xl text-ink sm:text-5xl">Upload images and generate measurements.</h1>
-            <p className="mt-3 max-w-2xl text-ink/65">Add up to three images or plan sheets, run the measurement step, review isolated object cards and the background summary, then save the selection as a project.</p>
+            <p className="text-sm font-semibold uppercase tracking-[0.3em] text-moss">Room Measurement</p>
+            <h1 className="mt-2 font-[family-name:var(--font-space-grotesk)] text-4xl text-ink sm:text-5xl">Generate 3D room blueprints from photos.</h1>
+            <p className="mt-3 max-w-2xl text-ink/65">Upload 3 photos of your room (each with a 1-meter ruler visible), and our system will detect the walls, measure them using the ruler scale, and generate a 3D blueprint of the room structure.</p>
             <p className="mt-3 max-w-2xl rounded-2xl border border-sand bg-sand/30 px-4 py-3 text-sm text-ink/70">
-              Length, width, and height are shown in mm, cm, and m. Use a known real-world dimension in the image or drawing to calibrate the scale. Height is still estimated from 2D geometry; true 3D height needs depth data or multi-view capture.
+              Place a 1-meter ruler on the floor or against walls. Take 3 photos from different angles covering the entire room. The system will detect the ruler as the reference scale and measure all walls automatically.
             </p>
           </div>
           <div className="rounded-2xl border border-line bg-sand/30 px-4 py-3 text-sm text-ink/70">
-            Selected objects: <span className="font-semibold text-ink">{selectedObjectIds.length}</span> · Total objects: <span className="font-semibold text-ink">{totalObjects}</span>
+            Images uploaded: <span className="font-semibold text-ink">{files.length}</span> / 3
           </div>
         </div>
 
@@ -170,76 +164,27 @@ export default function MeasurePage() {
                 id="project-name"
                 value={projectName}
                 onChange={(event) => setProjectName(event.target.value)}
-                placeholder="Example: Shelf scan June"
+                placeholder="Example: Living Room"
                 className="mt-2 w-full rounded-2xl border border-line bg-white px-4 py-3 text-sm outline-none ring-0 placeholder:text-ink/35 focus:border-moss"
               />
             </div>
 
-            <div>
-              <label className="text-sm font-semibold text-ink" htmlFor="reference-value">Known scale length</label>
-              {selectedReferenceObject && (
-                <EstimationHelper
-                  referenceName={selectedReferenceObject.name}
-                  referenceValue={selectedReferenceObject.value}
-                />
-              )}
-              <div className="mt-3 grid grid-cols-[1fr_96px] gap-3">
-                <input
-                  id="reference-value"
-                  type="number"
-                  min={0.1}
-                  step="0.1"
-                  placeholder="Enter one real length"
-                  value={referenceScaleValue}
-                  onChange={(event) => setReferenceScaleValue(event.target.value)}
-                  className="w-full rounded-2xl border border-line bg-white px-4 py-3 text-sm outline-none ring-0 placeholder:text-ink/35 focus:border-moss"
-                />
-                <select
-                  value={referenceScaleUnit}
-                  onChange={(event) => setReferenceScaleUnit(event.target.value as ScaleUnit)}
-                  className="w-full rounded-2xl border border-line bg-white px-4 py-3 text-sm outline-none ring-0 focus:border-moss"
-                >
-                  <option value="mm">mm</option>
-                  <option value="cm">cm</option>
-                  <option value="m">m</option>
-                </select>
-              </div>
-              <p className="mt-2 text-xs text-ink/55">You must enter one real dimension from the image, drawing, or plan. Without that scale, the app cannot produce real-world measurements.</p>
+            <div className="rounded-2xl border border-sand bg-sand/30 px-4 py-3 text-sm text-ink/70 space-y-2">
+              <p className="font-semibold text-ink">📏 Room Measurement Instructions</p>
+              <ol className="list-decimal list-inside space-y-1 text-xs">
+                <li>Place a <strong>1-meter ruler</strong> on the floor/wall</li>
+                <li>Take 3 photos covering different angles of the room</li>
+                <li>Ensure the ruler is clearly visible in each photo</li>
+                <li>Upload all 3 images below</li>
+              </ol>
+              <p className="text-xs font-semibold text-moss mt-3">Required: Exactly 3 images, each with ruler visible</p>
             </div>
-
-            {showReferenceGuide && (
-              <div className="space-y-3">
-                <button
-                  onClick={() => setShowReferenceGuide(false)}
-                  className="text-xs text-ink/50 hover:text-ink/70 transition underline"
-                >
-                  Hide reference guide
-                </button>
-                <ReferenceObjectGuide
-                  isOpen={showReferenceGuide}
-                  onSelectReference={(name, value) => {
-                    setReferenceScaleValue(value.toString());
-                    setSelectedReferenceObject({ name, value });
-                    setShowReferenceGuide(false);
-                  }}
-                  onClose={() => setShowReferenceGuide(false)}
-                />
-              </div>
-            )}
-            {!showReferenceGuide && (
-              <button
-                onClick={() => setShowReferenceGuide(true)}
-                className="text-xs text-moss hover:text-moss/80 transition underline font-semibold"
-              >
-                📏 Show reference objects guide
-              </button>
-            )}
 
             <div>
               <label className="flex cursor-pointer flex-col items-center justify-center rounded-[1.5rem] border-2 border-dashed border-line bg-white px-6 py-8 text-center transition hover:border-moss" htmlFor="image-upload">
                 <ImagePlus className="h-8 w-8 text-moss" />
-                <span className="mt-3 text-base font-semibold text-ink">Add up to 3 images</span>
-                <span className="mt-1 text-sm text-ink/55">Choose object photos before measuring.</span>
+                <span className="mt-3 text-base font-semibold text-ink">Add exactly 3 room photos</span>
+                <span className="mt-1 text-sm text-ink/55">Each must show the 1-meter ruler clearly.</span>
               </label>
               <input
                 id="image-upload"
@@ -256,18 +201,54 @@ export default function MeasurePage() {
                   setError('');
                 }}
               />
-            </div>
 
-            {previewFiles.length > 0 && (
-              <div className="grid gap-3 sm:grid-cols-3">
-                {previewFiles.map(({ file, previewUrl }) => (
-                  <div key={file.name} className="overflow-hidden rounded-2xl border border-line bg-white">
-                    <Image src={previewUrl} alt={file.name} width={320} height={224} unoptimized className="h-28 w-full object-cover" />
-                    <div className="px-3 py-2 text-xs text-ink/65">{file.name}</div>
+              {/* Image previews */}
+              {previewFiles.length > 0 && (
+                <div className="mt-4 space-y-3">
+                  <p className="text-sm font-semibold text-ink">Uploaded images ({files.length}/3)</p>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    {previewFiles.map((preview, index) => (
+                      <div key={index} className="relative rounded-2xl border border-line overflow-hidden bg-sand/20">
+                        <img src={preview.previewUrl} alt={`Preview ${index + 1}`} className="w-full h-32 object-cover" />
+                        <div className="absolute inset-0 bg-black/0 hover:bg-black/10 transition flex items-center justify-center gap-2 opacity-0 hover:opacity-100">
+                          <label htmlFor={`replace-${index}`} className="cursor-pointer bg-moss hover:bg-moss/80 text-white px-3 py-1 rounded-full text-xs font-semibold transition">
+                            Replace
+                          </label>
+                          <button
+                            onClick={() => {
+                              const newFiles = files.filter((_, i) => i !== index);
+                              setFiles(newFiles);
+                              setMeasurement(null);
+                            }}
+                            className="bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded-full text-xs font-semibold transition"
+                          >
+                            Remove
+                          </button>
+                          <input
+                            id={`replace-${index}`}
+                            type="file"
+                            accept="image/*"
+                            className="sr-only"
+                            onChange={(event) => {
+                              const newFile = event.target.files?.[0];
+                              if (newFile) {
+                                const newFiles = [...files];
+                                newFiles[index] = newFile;
+                                setFiles(newFiles);
+                                setMeasurement(null);
+                              }
+                            }}
+                          />
+                        </div>
+                        <div className="absolute top-2 right-2 bg-moss text-white rounded-full w-6 h-6 flex items-center justify-center text-xs font-bold">
+                          {index + 1}
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            )}
+                </div>
+              )}
+            </div>
 
             <button
               type="button"
@@ -292,10 +273,9 @@ export default function MeasurePage() {
               <EmptyResults />
             ) : (
               <>
-                {measurement.images.map((image) => (
+                {measurement.images[0] ? (
                   <MeasurementPanel
-                    key={`${image.imageName}-${image.imageIndex}`}
-                    image={image}
+                    image={measurement.images[0]}
                     selectedObjectIds={selectedObjectIds}
                     showBlueprintView={showBlueprintView}
                     onToggleBlueprintView={() => setShowBlueprintView(!showBlueprintView)}
@@ -305,7 +285,7 @@ export default function MeasurePage() {
                       );
                     }}
                   />
-                ))}
+                ) : null}
 
                 <div className="rounded-[1.75rem] border border-line bg-white p-6 shadow-sm">
                   <div className="flex items-start justify-between gap-4">
@@ -348,15 +328,17 @@ function MeasurementPanel({
   onToggleBlueprintView: () => void;
   onToggleObject: (objectId: string) => void;
 }) {
+  const displayedObjects = compactObjects(image.objects);
+
   return (
     <section className="rounded-[1.75rem] border border-line bg-white p-5 shadow-sm">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-moss">Image {image.imageIndex + 1}</p>
-          <h2 className="mt-2 text-xl font-semibold text-ink">{image.imageName}</h2>
+          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-moss">Fused 3-view output</p>
+          <h2 className="mt-2 text-xl font-semibold text-ink">Single 3D room blueprint with measurements</h2>
         </div>
         <div className="flex flex-col items-end gap-3 sm:flex-row sm:items-center">
-          <div className="rounded-full bg-sand/50 px-4 py-2 text-sm text-ink/65">White-background object previews and background-only view</div>
+          <div className="rounded-full bg-sand/50 px-4 py-2 text-sm text-ink/65">Combined room dimensions from all 3 images</div>
           <button
             onClick={onToggleBlueprintView}
             className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
@@ -389,13 +371,13 @@ function MeasurementPanel({
           {image.background.previewDataUrl && (
             <BlueprintView
               imageSrc={image.background.previewDataUrl}
-              measurements={[image.background, ...image.objects]}
+              measurements={[image.background, ...displayedObjects]}
               pixelsPerCm={image.pixelsPerCm}
               title={`Blueprint: ${image.imageName}`}
             />
           )}
           <div className="mt-5 space-y-2">
-            {image.objects.map((object) => (
+            {displayedObjects.map((object) => (
               <label key={object.id} className="flex cursor-pointer items-center gap-3 rounded-lg border border-line bg-paper/35 p-3 transition hover:border-moss/45">
                 <input type="checkbox" checked={selectedObjectIds.includes(object.id)} onChange={() => onToggleObject(object.id)} className="h-4 w-4 rounded border-line text-moss" />
                 <span className="text-sm font-medium text-ink">{object.name}</span>
@@ -411,7 +393,7 @@ function MeasurementPanel({
             <MeasurementTile measurement={image.background} />
           </div>
           <div className="grid gap-3">
-            {image.objects.map((object) => (
+            {displayedObjects.map((object) => (
               <ObjectMeasurementCard
                 key={object.id}
                 object={object}
@@ -505,7 +487,7 @@ function EmptyResults() {
     <div className="rounded-[1.75rem] border border-dashed border-line bg-white/70 p-8 text-center">
       <ImagePlus className="mx-auto h-10 w-10 text-moss" />
       <h2 className="mt-4 font-[family-name:var(--font-space-grotesk)] text-2xl text-ink">Upload images to see measurements.</h2>
-      <p className="mt-2 text-sm text-ink/60">After measurement runs, object cards and background summaries appear here for selection and saving.</p>
+      <p className="mt-2 text-sm text-ink/60">After measurement runs, you will get one unified 3D room view generated from all 3 images.</p>
     </div>
   );
 }

@@ -54,8 +54,13 @@ const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:800
 
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Request failed');
+    const raw = await response.text();
+    try {
+      const parsed = JSON.parse(raw) as { detail?: string };
+      throw new Error(parsed.detail || raw || 'Request failed');
+    } catch {
+      throw new Error(raw || 'Request failed');
+    }
   }
   return response.json() as Promise<T>;
 }
@@ -64,15 +69,11 @@ export async function measureImages(payload: {
   projectName: string;
   files: File[];
   userId?: string;
-  referenceWidthCm?: number;
 }): Promise<MeasureResponse> {
   const formData = new FormData();
   formData.append('project_name', payload.projectName);
   if (payload.userId) {
     formData.append('user_id', payload.userId);
-  }
-  if (typeof payload.referenceWidthCm === 'number' && payload.referenceWidthCm > 0) {
-    formData.append('reference_width_cm', String(payload.referenceWidthCm));
   }
 
   payload.files.slice(0, 3).forEach((file) => {

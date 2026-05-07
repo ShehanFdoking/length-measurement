@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from threading import Lock
 
-from app.schemas import ProjectRecord
+from ..schemas import ProjectRecord
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
