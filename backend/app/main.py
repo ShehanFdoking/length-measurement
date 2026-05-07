@@ -7,14 +7,16 @@ from typing import Annotated
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 
 from .schemas import MeasureResponse, ProjectCreateRequest, ProjectRecord
 from .services.measurement_room import analyze_room_measurement
 from .services.storage import get_project, load_projects, save_project
 from .services.room_3d import generate_room_box_zip
+from .services.room_3d_depth import generate_3d_room_from_depths
 from pydantic import BaseModel
 import io
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 
 app = FastAPI(title="Length Lab API", version="1.0.0")
 
@@ -99,3 +101,47 @@ def measure_3d(payload: Room3DRequest):
     """
     zip_bytes = generate_room_box_zip(payload.length_m, payload.width_m, payload.height_m, payload.backgroundDataUrl)
     return StreamingResponse(io.BytesIO(zip_bytes), media_type="application/zip", headers={"Content-Disposition": "attachment; filename=room3d.zip"})
+
+
+@app.post("/measure/3d/depth")
+async def measure_3d_depth(
+    files: Annotated[list[UploadFile], File(...)],
+    length_m: Annotated[float, Form(...)],
+    width_m: Annotated[float, Form(...)],
+    height_m: Annotated[float, Form(...)],
+    device: Annotated[str, Form(...)] = "cpu",
+):
+    """Generate a 3D room model using MiDaS depth estimation + point cloud fusion.
+
+    Accepts 3 images and room dimensions. Returns GLB file.
+    Optional `device` parameter: "cpu" (default) or "cuda" for GPU acceleration.
+    """
+    if len(files) != 3:
+        raise HTTPException(status_code=400, detail="Upload exactly 3 images for 3D depth fusion.")
+    
+    try:
+        # Read image bytes
+        image_bytes = []
+        for file in files:
+            content = await file.read()
+            image_bytes.append(content)
+        
+        # Generate 3D model in thread pool to avoid blocking
+        glb_bytes = await run_in_threadpool(
+            generate_3d_room_from_depths,
+            image_bytes,
+            float(length_m),
+            float(width_m),
+            float(height_m),
+            device,
+        )
+        
+        return StreamingResponse(
+            io.BytesIO(glb_bytes),
+            media_type="model/gltf-binary",
+            headers={"Content-Disposition": "attachment; filename=room3d.glb"},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"3D generation failed: {str(exc)}") from exc
